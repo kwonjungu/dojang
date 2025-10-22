@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>한국어 도장 생성기 (인터랙티브 편집)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Google Fonts 임포트 */
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@700;900&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Nanum+Myeongjo:wght@700;800&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Sunflower:wght@300;500;700&display=swap');
+        
+        body {
+            font-family: 'Noto Sans KR', sans-serif;
+            background-color: #f7f7f7;
+            user-select: none; /* 캔버스 드래그 시 텍스트 선택 방지 */
+        }
+        
+        #canvasContainer {
+            box-shadow: 0 10px 15px rgba(0, 0, 0, 0.1);
+        }
+
+        .color-input {
+            width: 40px;
+            height: 40px;
+            padding: 0;
+            border-radius: 6px;
+        }
+
+        /* 캔버스 커서 스타일 */
+        #stampCanvas.grabbing {
+            cursor: grabbing;
+        }
+        #stampCanvas.grab {
+            cursor: grab;
+        }
+        #stampCanvas.resizing {
+            cursor: nwse-resize; /* 기본 리사이즈 커서 */
+        }
+        #stampCanvas.tl, #stampCanvas.br {
+            cursor: nwse-resize;
+        }
+        #stampCanvas.tr, #stampCanvas.bl {
+            cursor: nesw-resize;
+        }
+        #stampCanvas.tm, #stampCanvas.bm {
+            cursor: ns-resize;
+        }
+        #stampCanvas.ml, #stampCanvas.mr {
+            cursor: ew-resize;
+        }
+    </style>
+    <script>
+        const CANVAS_SIZE = 250; 
+        
+        const FONT_OPTIONS = [
+            { name: "Noto Sans KR (본고딕)", value: "'Noto Sans KR', sans-serif" },
+            { name: "Nanum Myeongjo (나눔명조)", value: "'Nanum Myeongjo', serif" },
+            { name: "Gowun Batang (고운바탕)", value: "'Gowun Batang', serif" },
+            { name: "Sunflower (해바라기)", value: "'Sunflower', sans-serif" },
+            { name: "시스템 기본 (산세리프)", value: "sans-serif" },
+            { name: "시스템 기본 (명조)", value: "serif" }
+        ];
+
+        const SHAPE_OPTIONS = [
+            { name: "원형 (Circle)", value: "circle" },
+            { name: "정사각형 (Square)", value: "square" }
+        ];
+
+        let stampConfig = {
+            name: '제미니',
+            font: FONT_OPTIONS[0].value,
+            shape: 'circle', 
+            stampColor: '#C0392B',
+            bgColor: '#ffffff',
+            letters: [] // {char: 'A', x: 0, y: 0, fontSize: 60, selected: false, width: 0, height: 0, handles: []}
+        };
+
+        let selectedLetterIndex = -1; // 현재 선택된 글자의 인덱스
+        let isDragging = false;       // 드래그 중인지 여부
+        let isResizing = false;       // 크기 조절 중인지 여부
+        let resizeHandleType = null;  // 'tl', 'tr', 'bl', 'br', 'tm', etc.
+
+        let dragStartX = 0;           // 드래그/리사이즈 시작 시 마우스 X
+        let dragStartY = 0;           // 드래그/리사이즈 시작 시 마우스 Y
+        let letterOffsetX = 0;        // 글자 기준 마우스 X 오프셋
+        let letterOffsetY = 0;        // 글자 기준 마우스 Y 오프셋
+
+        // 캔버스 컨텍스트
+        let canvas, ctx;
+
+        /**
+         * 도장을 캔버스에 그리는 메인 함수
+         */
+        function drawStamp() {
+            // 캔버스 초기화 (배경색 적용)
+            ctx.fillStyle = stampConfig.bgColor;
+            ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+            
+            const borderWidth = 8;
+            const centerX = CANVAS_SIZE / 2;
+            const centerY = CANVAS_SIZE / 2;
+
+            // 1. 테두리 그리기
+            ctx.strokeStyle = stampConfig.stampColor;
+            ctx.lineWidth = borderWidth;
+            ctx.beginPath();
+            
+            if (stampConfig.shape === 'circle') {
+                const radius = (CANVAS_SIZE - borderWidth) / 2;
+                ctx.arc(centerX, centerY, radius, 0, Math.PI * 2, true);
+            } else if (stampConfig.shape === 'square') {
+                const innerSize = CANVAS_SIZE - borderWidth;
+                ctx.rect(borderWidth / 2, borderWidth / 2, innerSize, innerSize);
+            }
+            ctx.stroke();
+
+            // 2. 글자 그리기
+            ctx.fillStyle = stampConfig.stampColor;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            
+            stampConfig.letters.forEach((letter, index) => {
+                ctx.font = `900 ${letter.fontSize}px ${stampConfig.font}`; 
+                ctx.fillText(letter.char, letter.x, letter.y);
+
+                // 선택된 글자에 테두리 및 핸들 표시
+                if (index === selectedLetterIndex) {
+                    const padding = 10;
+                    const handleSize = 10;
+                    const halfHandle = handleSize / 2;
+                    
+                    // 텍스트 크기 측정
+                    ctx.font = `900 ${letter.fontSize}px ${stampConfig.font}`; // 폰트 설정 다시 적용
+                    const textMetrics = ctx.measureText(letter.char);
+                    const textWidth = textMetrics.width;
+                    const textHeight = letter.fontSize * 0.9; // 폰트 크기를 높이로 가정 (약간 조정)
+
+                    // Bounding Box 좌표 계산 (중앙 정렬 기준)
+                    const rectX = letter.x - textWidth / 2;
+                    const rectY = letter.y - textHeight / 2;
+                    const rectW = textWidth;
+                    const rectH = textHeight;
+
+                    // Bounding Box 그리기
+                    ctx.strokeStyle = '#3b82f6'; // 파란색
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([5, 5]); // 점선
+                    ctx.strokeRect(rectX - padding, rectY - padding, rectW + 2 * padding, rectH + 2 * padding);
+                    ctx.setLineDash([]); // 점선 해제
+                    
+                    // 8개의 핸들 위치 계산
+                    const corners = [
+                        { x: rectX - padding, y: rectY - padding, type: 'tl' }, // Top-Left
+                        { x: rectX + rectW / 2, y: rectY - padding, type: 'tm' }, // Top-Mid
+                        { x: rectX + rectW + padding, y: rectY - padding, type: 'tr' }, // Top-Right
+                        { x: rectX + rectW + padding, y: rectY + rectH / 2, type: 'mr' }, // Mid-Right
+                        { x: rectX + rectW + padding, y: rectY + rectH + padding, type: 'br' }, // Bottom-Right
+                        { x: rectX + rectW / 2, y: rectY + rectH + padding, type: 'bm' }, // Bottom-Mid
+                        { x: rectX - padding, y: rectY + rectH + padding, type: 'bl' }, // Bottom-Left
+                        { x: rectX - padding, y: rectY + rectH / 2, type: 'ml' }, // Mid-Left
+                    ];
+
+                    // 핸들 그리기
+                    ctx.fillStyle = '#3b82f6';
+                    ctx.strokeStyle = '#ffffff';
+                    ctx.lineWidth = 2;
+                    corners.forEach(corner => {
+                        ctx.fillRect(corner.x - halfHandle, corner.y - halfHandle, handleSize, handleSize);
+                        ctx.strokeRect(corner.x - halfHandle, corner.y - halfHandle, handleSize, handleSize);
+                    });
+                    
+                    // 핸들 정보를 글자에 저장 (히트 감지용)
+                    letter.handles = corners;
+                    letter.textWidth = textWidth;
+                    letter.textHeight = textHeight;
+                    letter.padding = padding;
+                }
+            });
+        }
+
+        /**
+         * 글자 수에 따라 기본 위치와 크기를 계산하고 stampConfig.letters를 업데이트합니다.
+         */
+        function updateConfigAndRedraw(newName, newFont, newShape, newStampColor, newBgColor) {
+            const trimmedName = (newName || stampConfig.name).replace(/\s/g, '');
+            const length = trimmedName.length;
+            const downloadButton = document.getElementById('downloadButton'); // 버튼 참조
+
+            const messageBox = document.getElementById('messageBox');
+            if (length < 2 || length > 4) {
+                messageBox.textContent = '이름은 2자에서 4자 사이로 입력해 주세요.';
+                messageBox.classList.remove('hidden');
+                if (ctx) ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+                renderLetterEditor();
+                downloadButton.disabled = true; // 글자가 없으면 다운로드 비활성화
+                return;
+            }
+            messageBox.classList.add('hidden');
+
+            const nameChanged = trimmedName !== stampConfig.letters.map(l => l.char).join('') || stampConfig.letters.length !== length;
+            
+            stampConfig.name = trimmedName;
+            if (newFont) stampConfig.font = newFont;
+            if (newShape) stampConfig.shape = newShape;
+            if (newStampColor) stampConfig.stampColor = newStampColor;
+            if (newBgColor) stampConfig.bgColor = newBgColor;
+
+            if (nameChanged) {
+                stampConfig.letters = [];
+                const centerX = CANVAS_SIZE / 2;
+                const centerY = CANVAS_SIZE / 2;
+                let defaultFontSize = 0;
+
+                if (length === 2) {
+                    defaultFontSize = 80;
+                    stampConfig.letters.push({ char: trimmedName[0], x: centerX, y: centerY - 45, fontSize: defaultFontSize });
+                    stampConfig.letters.push({ char: trimmedName[1], x: centerX, y: centerY + 45, fontSize: defaultFontSize });
+                } else if (length === 3) {
+                    defaultFontSize = 65;
+                    stampConfig.letters.push({ char: trimmedName[0], x: centerX, y: centerY - 60, fontSize: defaultFontSize });
+                    stampConfig.letters.push({ char: trimmedName[1], x: centerX, y: centerY, fontSize: defaultFontSize });
+                    stampConfig.letters.push({ char: trimmedName[2], x: centerX, y: centerY + 60, fontSize: defaultFontSize });
+                } else if (length === 4) {
+                    defaultFontSize = 60;
+                    const offset = 45; 
+                    stampConfig.letters.push({ char: trimmedName[0], x: centerX - offset, y: centerY - offset, fontSize: defaultFontSize });
+                    stampConfig.letters.push({ char: trimmedName[1], x: centerX - offset, y: centerY + offset, fontSize: defaultFontSize });
+                    stampConfig.letters.push({ char: trimmedName[2], x: centerX + offset, y: centerY - offset, fontSize: defaultFontSize });
+                    stampConfig.letters.push({ char: trimmedName[3], x: centerX + offset, y: centerY + offset, fontSize: defaultFontSize });
+                }
+                
+                selectedLetterIndex = -1;
+                renderLetterEditor();
+            }
+
+            drawStamp();
+            downloadButton.disabled = false; // 도장이 생성되면 다운로드 활성화
+        }
+
+        /**
+         * 글자 위치 및 크기 편집기를 동적으로 렌더링합니다.
+         */
+        function renderLetterEditor() {
+            const editorDiv = document.getElementById('letterEditor');
+            let html = '';
+            
+            if (stampConfig.letters.length === 0) {
+                editorDiv.innerHTML = '<p class="text-gray-500 text-center">이름을 입력하여 글자 편집기를 활성화하세요.</p>';
+                document.getElementById('letterEditorContainer').classList.remove('hidden');
+                return;
+            }
+
+            stampConfig.letters.forEach((letter, index) => {
+                const isSelectedClass = index === selectedLetterIndex ? 'border-red-500 bg-red-50' : 'border-gray-200 bg-white';
+                html += `
+                    <div class="flex items-center space-x-3 p-3 ${isSelectedClass} rounded-lg shadow-sm transition-all duration-100">
+                        <span class="font-bold text-red-600 w-8 text-center text-xl">${letter.char}</span>
+                        <div class="flex-1">
+                            <label class="block text-xs font-medium text-gray-500">X (가로)</label>
+                            <input type="number" data-index="${index}" data-coord="x" value="${Math.round(letter.x)}" min="0" max="${CANVAS_SIZE}"
+                                class="w-full px-2 py-1 border rounded-md text-sm focus:ring-red-500" oninput="handleCoordChange(this)">
+                        </div>
+                        <div class="flex-1">
+                            <label class="block text-xs font-medium text-gray-500">Y (세로)</label>
+                            <input type="number" data-index="${index}" data-coord="y" value="${Math.round(letter.y)}" min="0" max="${CANVAS_SIZE}"
+                                class="w-full px-2 py-1 border rounded-md text-sm focus:ring-red-500" oninput="handleCoordChange(this)">
+                        </div>
+                        <div class="flex-1">
+                            <label class="block text-xs font-medium text-gray-500">크기</label>
+                            <input type="number" data-index="${index}" data-coord="fontSize" value="${Math.round(letter.fontSize)}" min="10" max="150"
+                                class="w-full px-2 py-1 border rounded-md text-sm focus:ring-red-500" oninput="handleCoordChange(this)">
+                        </div>
+                    </div>
+                `;
+            });
+            editorDiv.innerHTML = html;
+            document.getElementById('letterEditorContainer').classList.remove('hidden');
+        }
+
+        /**
+         * 글자 좌표/크기 입력값 변경 핸들러
+         */
+        function handleCoordChange(input) {
+            const index = parseInt(input.dataset.index);
+            const coord = input.dataset.coord;
+            const value = parseFloat(input.value);
+
+            if (isNaN(value) || value < 0) {
+                console.warn(`Invalid value: ${value}`);
+                return; 
+            }
+            
+            if (coord === 'fontSize') {
+                // 폰트 크기 범위 제한 (10 ~ 150)
+                stampConfig.letters[index][coord] = Math.max(10, Math.min(150, value));
+            } else {
+                // X, Y 좌표 범위 제한 (0 ~ CANVAS_SIZE)
+                stampConfig.letters[index][coord] = Math.max(0, Math.min(CANVAS_SIZE, value));
+            }
+            
+            drawStamp();
+        }
+
+        /**
+         * 모든 글자의 크기를 일괄적으로 변경합니다.
+         */
+        function handleBatchSizeChange() {
+            const input = document.getElementById('batchSizeInput');
+            const newSize = parseFloat(input.value);
+            const messageBox = document.getElementById('messageBox');
+
+            if (stampConfig.letters.length === 0) {
+                messageBox.textContent = '먼저 이름을 입력하여 도장을 생성해야 합니다.';
+                messageBox.classList.remove('hidden');
+                return;
+            }
+
+            if (isNaN(newSize) || newSize < 10 || newSize > 150) {
+                messageBox.textContent = '일괄 크기는 10에서 150 사이의 숫자로 입력해 주세요.';
+                messageBox.classList.remove('hidden');
+                return;
+            }
+            messageBox.classList.add('hidden');
+
+            stampConfig.letters.forEach(letter => {
+                letter.fontSize = newSize;
+            });
+
+            // 편집기 및 캔버스 업데이트
+            renderLetterEditor();
+            drawStamp();
+        }
+        
+        // ... (handleConfigChange, generateStamp, downloadStamp 함수는 그대로 유지) ...
+        function handleConfigChange(type, value) {
+            if (type === 'stampColor') stampConfig.stampColor = value;
+            else if (type === 'bgColor') stampConfig.bgColor = value;
+            else if (type === 'shape') stampConfig.shape = value;
+            else if (type === 'font') stampConfig.font = value;
+            
+            drawStamp();
+        }
+
+        function generateStamp() {
+            const name = document.getElementById('nameInput').value;
+            const selectedFont = document.getElementById('fontSelect').value;
+            const selectedShape = document.getElementById('shapeSelect').value;
+            const stampColor = document.getElementById('stampColorInput').value;
+            const bgColor = document.getElementById('bgColorInput').value;
+
+            const currentName = stampConfig.letters.map(l => l.char).join('');
+            
+            if (name.replace(/\s/g, '') !== currentName || stampConfig.letters.length === 0) {
+                updateConfigAndRedraw(name, selectedFont, selectedShape, stampColor, bgColor);
+            } else {
+                updateConfigAndRedraw(null, selectedFont, selectedShape, stampColor, bgColor);
+            }
+             // 이름 변경이 없어도 미리보기 버튼을 누르면 다운로드 버튼 활성화
+            if (stampConfig.letters.length >= 2 && stampConfig.letters.length <= 4) {
+                 document.getElementById('downloadButton').disabled = false;
+            }
+        }
+
+        function downloadStamp() {
+            const name = document.getElementById('nameInput').value.replace(/\s/g, '');
+            const filename = `도장_${name || '새이름'}.png`;
+
+            const link = document.createElement('a');
+            link.download = filename;
+            link.href = canvas.toDataURL('image/png'); 
+            link.click();
+        }
+
+        // --- 캔버스 인터랙션 로직 ---
+
+        function getMousePos(e) {
+            const rect = canvas.getBoundingClientRect();
+            let clientX = e.clientX;
+            let clientY = e.clientY;
+
+            if (e.touches && e.touches.length > 0) {
+                clientX = e.touches[0].clientX;
+                clientY = e.touches[0].clientY;
+            }
+            return {
+                x: clientX - rect.left,
+                y: clientY - rect.top
+            };
+        }
+
+        /**
+         * 핸들을 클릭했는지 확인합니다.
+         */
+        function checkHandleHit(mousePos) {
+            const letter = stampConfig.letters[selectedLetterIndex];
+            if (!letter || !letter.handles) return null;
+
+            const handleSize = 10;
+            const halfHandle = handleSize / 2;
+
+            for (const handle of letter.handles) {
+                if (mousePos.x >= handle.x - halfHandle && mousePos.x <= handle.x + halfHandle &&
+                    mousePos.y >= handle.y - halfHandle && mousePos.y <= handle.y + halfHandle) {
+                    return handle.type; // 'tl', 'tr', 'br', etc. 반환
+                }
+            }
+            return null;
+        }
+
+        /**
+         * 글자 자체를 클릭했는지 확인합니다.
+         */
+        function checkLetterHit(mousePos) {
+            for (let i = 0; i < stampConfig.letters.length; i++) {
+                const letter = stampConfig.letters[i];
+                ctx.font = `900 ${letter.fontSize}px ${stampConfig.font}`;
+                const textMetrics = ctx.measureText(letter.char);
+                const textWidth = textMetrics.width;
+                const textHeight = letter.fontSize;
+
+                const hitBuffer = 15;
+                const x1 = letter.x - textWidth / 2 - hitBuffer;
+                const y1 = letter.y - textHeight / 2 - hitBuffer;
+                const x2 = letter.x + textWidth / 2 + hitBuffer;
+                const y2 = letter.y + textHeight / 2 + hitBuffer;
+
+                if (mousePos.x >= x1 && mousePos.x <= x2 &&
+                    mousePos.y >= y1 && mousePos.y <= y2) {
+                    return i;
+                }
+            }
+            return -1;
+        }
+
+        function setCanvasCursor(handleType) {
+            canvas.classList.remove('grab', 'tl', 'tr', 'br', 'bl', 'tm', 'bm', 'ml', 'mr', 'grabbing');
+            if (handleType) {
+                canvas.classList.add(handleType);
+            }
+        }
+        
+        window.onload = function() {
+            canvas = document.getElementById('stampCanvas');
+            ctx = canvas.getContext('2d');
+            canvas.width = CANVAS_SIZE;
+            canvas.height = CANVAS_SIZE;
+
+            // ... (드롭다운 초기화 및 UI 값 적용 코드는 그대로 유지) ...
+            const fontSelect = document.getElementById('fontSelect');
+            FONT_OPTIONS.forEach(font => {
+                const option = document.createElement('option');
+                option.value = font.value;
+                option.textContent = font.name;
+                fontSelect.appendChild(option);
+            });
+            
+            const shapeSelect = document.getElementById('shapeSelect');
+            SHAPE_OPTIONS.forEach(shape => {
+                const option = document.createElement('option');
+                option.value = shape.value;
+                option.textContent = shape.name;
+                shapeSelect.appendChild(option);
+            });
+            
+            document.getElementById('nameInput').value = stampConfig.name;
+            document.getElementById('stampColorInput').value = stampConfig.stampColor;
+            document.getElementById('bgColorInput').value = stampConfig.bgColor;
+            document.getElementById('fontSelect').value = stampConfig.font;
+            document.getElementById('shapeSelect').value = stampConfig.shape;
+
+            updateConfigAndRedraw(stampConfig.name, stampConfig.font, stampConfig.shape, stampConfig.stampColor, stampConfig.bgColor);
+            renderLetterEditor();
+
+            document.getElementById('nameInput').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    generateStamp();
+                }
+            });
+
+            // --- 캔버스 인터랙션 로직 ---
+            
+            const handleDown = (e) => {
+                e.preventDefault();
+                const mousePos = getMousePos(e);
+                let hitIndex = -1;
+                let handleType = null;
+
+                // 1. 리사이즈 핸들 히트 감지 (선택된 글자가 있어야 함)
+                if (selectedLetterIndex !== -1) {
+                    handleType = checkHandleHit(mousePos);
+                    if (handleType) {
+                        isResizing = true;
+                        resizeHandleType = handleType;
+                        dragStartX = mousePos.x;
+                        dragStartY = mousePos.y;
+                        canvas.classList.add('grabbing');
+                        return;
+                    }
+                }
+                
+                // 2. 글자 자체 히트 감지 (드래그)
+                hitIndex = checkLetterHit(mousePos);
+                if (hitIndex !== -1) {
+                    selectedLetterIndex = hitIndex;
+                    isDragging = true;
+                    
+                    letterOffsetX = mousePos.x - stampConfig.letters[selectedLetterIndex].x;
+                    letterOffsetY = mousePos.y - stampConfig.letters[selectedLetterIndex].y;
+
+                    canvas.classList.add('grabbing');
+                } else {
+                    // 3. 아무것도 클릭하지 않았을 때 선택 해제
+                    selectedLetterIndex = -1;
+                    canvas.classList.remove('grabbing');
+                    setCanvasCursor(null);
+                }
+                renderLetterEditor();
+                drawStamp();
+            };
+
+            const handleMove = (e) => {
+                e.preventDefault(); 
+                const mousePos = getMousePos(e);
+                const letter = stampConfig.letters[selectedLetterIndex];
+                
+                if (isResizing && selectedLetterIndex !== -1) {
+                    // --- 리사이징 로직 ---
+                    const deltaX = mousePos.x - dragStartX;
+                    const deltaY = mousePos.y - dragStartY;
+                    
+                    // 크기 변화 계산. Uniform Scaling을 위해 X, Y 변화 중 더 큰 값을 사용
+                    let sizeDelta = 0;
+
+                    // 코너 핸들: 대각선 방향 이동에 따라 크기 조절
+                    if (resizeHandleType.includes('t') && resizeHandleType.includes('l')) { // tl
+                        sizeDelta = -(deltaX + deltaY) * 0.5;
+                    } else if (resizeHandleType.includes('t') && resizeHandleType.includes('r')) { // tr
+                        sizeDelta = (deltaX - deltaY) * 0.5;
+                    } else if (resizeHandleType.includes('b') && resizeHandleType.includes('l')) { // bl
+                        sizeDelta = (-deltaX + deltaY) * 0.5;
+                    } else if (resizeHandleType.includes('b') && resizeHandleType.includes('r')) { // br
+                        sizeDelta = (deltaX + deltaY) * 0.5;
+                    } 
+                    // 측면 핸들은 코너 핸들과 유사하게 처리하여 유니폼 스케일링 유지
+                    else if (resizeHandleType === 'tm' || resizeHandleType === 'bm') {
+                         sizeDelta = resizeHandleType === 'tm' ? -deltaY * 0.8 : deltaY * 0.8;
+                    } else if (resizeHandleType === 'ml' || resizeHandleType === 'mr') {
+                         sizeDelta = resizeHandleType === 'ml' ? -deltaX * 0.8 : deltaX * 0.8;
+                    }
+
+                    // 새 폰트 크기 계산 및 제한 (10px ~ 150px)
+                    let newFontSize = letter.fontSize + sizeDelta * 0.2; // Scaling sensitivity 0.2
+                    newFontSize = Math.max(10, Math.min(150, newFontSize));
+                    
+                    if (letter.fontSize !== newFontSize) {
+                        letter.fontSize = newFontSize;
+
+                        // 숫자 입력 필드 업데이트
+                        const sizeInput = document.querySelector(`input[data-index="${selectedLetterIndex}"][data-coord="fontSize"]`);
+                        if (sizeInput) sizeInput.value = Math.round(newFontSize);
+                    }
+
+                    // 드래그 시작점 업데이트 (상대적인 움직임을 위해)
+                    dragStartX = mousePos.x;
+                    dragStartY = mousePos.y;
+                    
+                } else if (isDragging && selectedLetterIndex !== -1) {
+                    // --- 드래그 로직 ---
+                    letter.x = mousePos.x - letterOffsetX;
+                    letter.y = mousePos.y - letterOffsetY;
+
+                    letter.x = Math.max(0, Math.min(CANVAS_SIZE, letter.x));
+                    letter.y = Math.max(0, Math.min(CANVAS_SIZE, letter.y));
+
+                    const xInput = document.querySelector(`input[data-index="${selectedLetterIndex}"][data-coord="x"]`);
+                    const yInput = document.querySelector(`input[data-index="${selectedLetterIndex}"][data-coord="y"]`);
+                    if (xInput && yInput) {
+                        xInput.value = Math.round(letter.x);
+                        yInput.value = Math.round(letter.y);
+                    }
+                } else {
+                    // 드래그/리사이즈 중이 아니면 커서 업데이트
+                    if (selectedLetterIndex !== -1) {
+                        const handleType = checkHandleHit(mousePos);
+                        if (handleType) {
+                            setCanvasCursor(handleType);
+                        } else if (checkLetterHit(mousePos) !== -1) {
+                            setCanvasCursor('grab');
+                        } else {
+                            setCanvasCursor(null);
+                        }
+                    } else {
+                        setCanvasCursor(null);
+                    }
+                }
+                
+                drawStamp();
+            };
+
+            const handleUp = () => {
+                isDragging = false;
+                isResizing = false;
+                resizeHandleType = null;
+                canvas.classList.remove('grabbing');
+                drawStamp();
+            };
+            
+            // 마우스 이벤트 리스너
+            canvas.addEventListener('mousedown', handleDown);
+            canvas.addEventListener('mousemove', handleMove);
+            canvas.addEventListener('mouseup', handleUp);
+            
+            // 터치 이벤트 리스너
+            canvas.addEventListener('touchstart', handleDown);
+            canvas.addEventListener('touchmove', handleMove);
+            canvas.addEventListener('touchend', handleUp);
+
+            // Esc 키로 선택 해제
+            window.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape' && selectedLetterIndex !== -1) {
+                    selectedLetterIndex = -1;
+                    renderLetterEditor();
+                    drawStamp();
+                }
+            });
+        };
+    </script>
+</head>
+<body class="p-4 sm:p-8 flex items-start justify-center min-h-screen">
+    <div class="bg-white p-6 sm:p-10 rounded-xl shadow-2xl w-full max-w-5xl flex flex-col lg:flex-row space-y-8 lg:space-y-0 lg:space-x-8">
+        
+        <!-- 설정 및 편집기 패널 --><div class="lg:w-1/2 flex flex-col space-y-6">
+            <h1 class="text-3xl font-extrabold text-gray-800 text-center lg:text-left">
+                🇰🇷 도장 설정 편집기
+            </h1>
+            <p class="text-gray-600">이름을 입력하고, 원하는 폰트, 형태, 색상을 선택한 후 글자 배치를 조정하여 완벽한 도장을 만드세요. **캔버스에서 글자를 직접 드래그 및 크기 조절할 수 있습니다!**</p>
+
+            <!-- 필수 설정 (이름 입력 및 생성) --><div class="p-4 bg-gray-50 rounded-xl shadow-inner space-y-3">
+                <label for="nameInput" class="block font-bold text-gray-700">이름 입력 (2~4자)</label>
+                <input 
+                    type="text" 
+                    id="nameInput" 
+                    maxlength="4"
+                    placeholder="여기에 이름을 입력하세요 (예: 홍길동)" 
+                    class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 text-lg font-semibold"
+                >
+                <button 
+                    onclick="generateStamp()" 
+                    class="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-lg shadow-md transition duration-200 text-lg active:scale-95 transform"
+                >
+                    도장 미리보기
+                </button>
+            </div>
+            
+            <!-- 기본 옵션 (폰트, 형태, 색상) --><div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                
+                <!-- 폰트 선택 --><div>
+                    <label for="fontSelect" class="block font-bold text-gray-700 mb-1">폰트 선택</label>
+                    <select 
+                        id="fontSelect" 
+                        class="w-full px-3 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 bg-white"
+                        onchange="handleConfigChange('font', this.value)"
+                    >
+                        <!-- 옵션은 JavaScript에서 채워집니다. --></select>
+                </div>
+
+                <!-- 형태 선택 --><div>
+                    <label for="shapeSelect" class="block font-bold text-gray-700 mb-1">도장 형태</label>
+                    <select 
+                        id="shapeSelect" 
+                        class="w-full px-3 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 bg-white"
+                        onchange="handleConfigChange('shape', this.value)"
+                    >
+                        <!-- 옵션은 JavaScript에서 채워집니다. --></select>
+                </div>
+
+                <!-- 색상 선택 --><div class="flex space-x-2">
+                    <div>
+                        <label for="stampColorInput" class="block font-bold text-gray-700 mb-1">인주색</label>
+                        <input type="color" id="stampColorInput" class="color-input" onchange="handleConfigChange('stampColor', this.value)">
+                    </div>
+                    <div>
+                        <label for="bgColorInput" class="block font-bold text-gray-700 mb-1">배경색</label>
+                        <input type="color" id="bgColorInput" class="color-input" onchange="handleConfigChange('bgColor', this.value)">
+                    </div>
+                </div>
+            </div>
+
+            <!-- 일괄 크기 조정 컨트롤 추가 -->
+            <div class="p-4 bg-gray-50 rounded-xl shadow-inner space-y-3">
+                <h3 class="text-xl font-bold text-gray-700">글자 일괄 크기 조정 (10~150px)</h3>
+                <div class="flex space-x-3">
+                    <input 
+                        type="number" 
+                        id="batchSizeInput" 
+                        placeholder="새 크기 입력 (10~150)" 
+                        min="10" 
+                        max="150"
+                        class="flex-1 px-4 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 text-base"
+                    >
+                    <button 
+                        onclick="handleBatchSizeChange()" 
+                        class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-lg shadow-md transition duration-200 active:scale-95 transform"
+                    >
+                        일괄 적용
+                    </button>
+                </div>
+            </div>
+
+            <!-- 글자 위치 편집기 --><div id="letterEditorContainer" class="bg-gray-100 p-4 rounded-xl shadow">
+                <h3 class="text-xl font-bold text-gray-800 mb-3">글자 위치 및 크기 미세 조정</h3>
+                <div id="letterEditor" class="space-y-2">
+                    <!-- 글자별 X/Y/크기 입력 필드가 여기에 동적으로 렌더링됩니다. --></div>
+            </div>
+        </div>
+
+
+        <!-- 도장 미리보기 및 다운로드 섹션 --><div class="lg:w-1/2 flex flex-col items-center space-y-6">
+            <h2 class="text-2xl font-bold text-gray-800">도장 미리보기</h2>
+            
+            <!-- 캔버스 경고 메시지 --><div id="messageBox" class="hidden bg-yellow-100 border-l-4 border-yellow-500 text-yellow-700 p-4 mb-3 rounded-md w-full" role="alert">
+                <!-- 메시지가 여기에 표시됩니다. --></div>
+
+            <div id="canvasContainer" class="rounded-xl overflow-hidden border-2 border-gray-300">
+                <canvas 
+                    id="stampCanvas" 
+                    width="250" 
+                    height="250" 
+                    class="block grab"
+                ></canvas>
+            </div>
+            
+            <button 
+                id="downloadButton"
+                onclick="downloadStamp()" 
+                class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-lg shadow-lg transition duration-200 disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 transform"
+            >
+                PNG 이미지로 다운로드
+            </button>
+        </div>
+        
+    </div>
+</body>
+</html>
